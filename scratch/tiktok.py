@@ -1,7 +1,7 @@
 from TikTokApi import TikTokApi
 from datetime import datetime, timezone
 import asyncio
-import json
+import jso
 import os
 from typing import Any, Dict, List, Optional
 
