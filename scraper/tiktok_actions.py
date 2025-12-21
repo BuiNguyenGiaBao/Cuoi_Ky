@@ -180,6 +180,41 @@ def save_csv(file, rows, headers):
         else:
             writer.writerow(rows)
 
+def scroll_get_video_links(driver, limit):
+    driver.get(TARGET_PROFILE)
+    time.sleep(6)
+    solve_captcha(driver)
+
+    links = set()
+    no_new_round = 0
+    MAX_NO_NEW = 6   # sau 6 lần scroll không có video mới → dừng
+
+    last_height = driver.execute_script("return document.body.scrollHeight")
+
+    while len(links) < limit and no_new_round < MAX_NO_NEW:
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight)")
+        time.sleep(random.uniform(2.5, 4))
+
+        elems = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/video/"]')
+        for e in elems:
+            href = e.get_attribute("href")
+            if href and "/video/" in href:
+                links.add(href)
+
+        new_height = driver.execute_script("return document.body.scrollHeight")
+
+        if new_height == last_height:
+            no_new_round += 1
+            logger.warning(f"⚠️ Không load thêm video ({no_new_round}/{MAX_NO_NEW})")
+        else:
+            no_new_round = 0
+
+        last_height = new_height
+        logger.info(f"📹 Đã lấy {len(links)} video")
+
+    logger.info(f"🛑 Dừng scroll tại {len(links)} video")
+    return list(links)[:limit]
+
 
 # ================= MAIN =================
 def main():
@@ -187,12 +222,19 @@ def main():
     user_agent = driver.execute_script("return navigator.userAgent")
 
     try:
-        logger.info("🚀 BẮT ĐẦU")
+        logger.info("🚀 BẮT ĐẦU CÀO TIKTOK")
+
         video_links = scroll_get_video_links(driver, LIMIT_VIDEOS)
+
+        if not video_links:
+            logger.error("❌ Không lấy được video nào – kiểm tra URL profile")
+            return
+
         cookies = get_cookie_dict(driver)
 
         for idx, url in enumerate(video_links, 1):
-            logger.info(f"\n[{idx}] {url}")
+            logger.info(f"\n[{idx}/{len(video_links)}] {url}")
+
             video = get_video_info(driver, url)
             save_csv(VIDEO_FILE, video, video.keys())
 
@@ -202,16 +244,13 @@ def main():
                 user_agent,
                 MAX_COMMENTS_PER_VIDEO
             )
+
             if comments:
                 save_csv(COMMENT_FILE, comments, comments[0].keys())
 
-            time.sleep(random.uniform(5, 8))
+            time.sleep(random.uniform(4, 7))
 
-        logger.info("✅ HOÀN THÀNH")
+        logger.info("✅ HOÀN THÀNH TOÀN BỘ")
 
     finally:
         driver.quit()
-
-
-if __name__ == "__main__":
-    main()
