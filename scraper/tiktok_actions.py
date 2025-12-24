@@ -4,11 +4,15 @@ import random
 import csv
 import os
 import logging
-import requests
-
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
+# ================= CẤU HÌNH (SỬA Ở ĐÂY) =================
+# Hãy đổi sang một Profile cụ thể, đừng dùng trang chủ
+TARGET_PROFILE = "https://www.tiktok.com"
+LIMIT_VIDEOS = 200           # Số lượng video muốn lấy
+MAX_COMMENTS_PER_VIDEO = 100    # Số comment tối đa mỗi video
 
 
 # ================= CONFIG =================
@@ -18,16 +22,14 @@ MAX_COMMENTS_PER_VIDEO = 50
 
 VIDEO_FILE = "tiktok_videos.csv"
 COMMENT_FILE = "tiktok_comments.csv"
+VIDEO_FILE = "tiktok_videos_fixed.csv"
+COMMENT_FILE = "tiktok_comments_fixed.csv"
 
 # ================= LOGGING =================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-
-# ================= SELENIUM =================
+# ================= 1. KHỞI TẠO TRÌNH DUYỆT =================
 def setup_driver():
     options = uc.ChromeOptions()
     options.add_argument("--start-maximized")
@@ -36,93 +38,83 @@ def setup_driver():
     options.add_argument(
         "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     )
-    return uc.Chrome(options=options)
 
+    driver = uc.Chrome(options=options)
+    return driver
 
 def solve_captcha(driver):
+    """Đợi bạn giải Captcha nếu nó hiện ra"""
     try:
-        WebDriverWait(driver, 5).until(
-            EC.presence_of_element_located((By.CLASS_NAME, "captcha_verify_container"))
-        )
-        logger.warning("⚠️ CAPTCHA phát hiện – vui lòng giải tay")
-        WebDriverWait(driver, 300).until_not(
-            EC.presence_of_element_located((By.CLASS_NAME, "captcha_verify_container"))
-        )
-        logger.info("✅ CAPTCHA đã giải")
+        if driver.find_elements(By.CLASS_NAME, "captcha_verify_container"):
+            logger.warning("⚠️ PHÁT HIỆN CAPTCHA! Bạn có 60s để giải bằng tay...")
+            WebDriverWait(driver, 60).until_not(
+                EC.presence_of_element_located((By.CLASS_NAME, "captcha_verify_container"))
+            )
+            logger.info("✅ Captcha đã xong.")
+            time.sleep(2)
     except:
         pass
 
-
-def get_cookie_dict(driver):
-    cookies = driver.get_cookies()
-    return {c["name"]: c["value"] for c in cookies}
-
-
-# ================= VIDEO LINKS =================
-def scroll_get_video_links(driver, limit):
-    driver.get(TARGET_PROFILE)
-    time.sleep(5)
+# ================= 2. LẤY LINK VIDEO TỪ PROFILE =================
+def get_video_links(driver, url, limit):
+    logger.info(f"🌍 Đang truy cập: {url}")
+    driver.get(url)
+    time.sleep(5) # Chờ web load
     solve_captcha(driver)
-
+    
     links = set()
-
+    
+    # Cuộn trang để lấy đủ link
     while len(links) < limit:
-        driver.execute_script("window.scrollBy(0, 800)")
-        time.sleep(random.uniform(2, 3))
-
+        # Tìm thẻ a chứa link video (Selector chuẩn cho Profile)
         elems = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/video/"]')
+        
         for e in elems:
             href = e.get_attribute("href")
-            if href and "/video/" in href:
+            if href:
                 links.add(href)
+                if len(links) >= limit: break
+        
+        if len(links) >= limit: break
 
-        logger.info(f"📹 Đã lấy {len(links)}/{limit} video")
-
-        if len(links) >= limit:
-            break
-
+        logger.info(f"📜 Đang cuộn... Đã tìm thấy {len(links)} video")
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(random.uniform(2, 4))
+        
     return list(links)[:limit]
 
-
-# ================= VIDEO INFO =================
-def get_video_info(driver, url):
-    driver.get(url)
-    time.sleep(4)
+# ================= 3. LẤY THÔNG TIN VIDEO =================
+def get_video_data(driver, video_url):
+    driver.get(video_url)
+    time.sleep(3)
     solve_captcha(driver)
-
-    video_id = url.split("/video/")[-1].split("?")[0]
-
+    
+    video_id = video_url.split("/video/")[-1].split("?")[0]
+    
     data = {
-        "video_url": url,
         "video_id": video_id,
-        "caption": "",
-        "like_count": "",
-        "comment_count": "",
-        "share_count": "",
+        "url": video_url,
+        "caption": "N/A",
+        "likes": "0",
+        "comments_count": "0"
     }
-
+    
     try:
-        caption = driver.find_element(By.CSS_SELECTOR, '[data-e2e="video-desc"]')
-        data["caption"] = caption.text
-    except:
-        pass
-
-    buttons = driver.find_elements(By.TAG_NAME, "button")
-    for b in buttons:
-        aria = (b.get_attribute("aria-label") or "").lower()
-        num = "".join(filter(str.isdigit, aria))
-
-        if "like" in aria or "thích" in aria:
-            data["like_count"] = num
-        if "comment" in aria or "bình luận" in aria:
-            data["comment_count"] = num
-        if "share" in aria or "chia sẻ" in aria:
-            data["share_count"] = num
-
-    logger.info(
-        f"🎬 {video_id} | ❤️ {data['like_count']} | 💬 {data['comment_count']}"
-    )
+        # Dùng data-e2e là ổn định nhất
+        data["caption"] = driver.find_element(By.CSS_SELECTOR, '[data-e2e="video-desc"]').text
+    except: pass
+    
+    try:
+        data["likes"] = driver.find_element(By.CSS_SELECTOR, '[data-e2e="like-count"]').text
+    except: pass
+    
+    try:
+        data["comments_count"] = driver.find_element(By.CSS_SELECTOR, '[data-e2e="comment-count"]').text
+    except: pass
+    
+    logger.info(f"🎬 Video: {video_id} | ❤️ {data['likes']} | 💬 {data['comments_count']}")
     return data
+
 
 
 # ================= TIKTOK API COMMENT =================
@@ -209,37 +201,93 @@ def save_csv(file, rows, headers):
             writer.writerow(rows)
 
 
+# ================= 4. LẤY COMMENT (BẰNG SELENIUM) =================
+def get_comments(driver, video_id, max_cmt):
+    comments = []
+    logger.info("⬇️ Đang tải comment...")
+    
+    last_count = 0
+    retries = 0
+    
+    while len(comments) < max_cmt:
+        # Tìm tất cả các ô comment cấp 1
+        cmt_elems = driver.find_elements(By.CSS_SELECTOR, '[data-e2e="comment-level-1"]')
+        
+        if len(cmt_elems) > last_count:
+            # Xử lý các comment mới load được
+            new_items = cmt_elems[last_count:]
+            for item in new_items:
+                try:
+                    user = item.find_element(By.CSS_SELECTOR, '[data-e2e="comment-username"]').text
+                    text = item.find_element(By.CSS_SELECTOR, '[data-e2e="comment-level-1-content"]').text
+                    
+                    comments.append({
+                        "video_id": video_id,
+                        "user": user,
+                        "text": text.replace("\n", " ")
+                    })
+                    if len(comments) >= max_cmt: break
+                except: continue
+            
+            last_count = len(cmt_elems)
+            retries = 0
+            logger.info(f"   -> Đã lấy {len(comments)} comment...")
+            
+            # Cuộn xuống một chút để load tiếp
+            driver.execute_script("window.scrollBy(0, 600);")
+            time.sleep(2)
+        else:
+            retries += 1
+            driver.execute_script("window.scrollBy(0, 500);")
+            time.sleep(2)
+            if retries > 3: break # Hết comment hoặc mạng lag
+            
+    return comments
+
+# ================= 5. LƯU FILE =================
+def save_to_csv(filename, data_list):
+    if not data_list: return
+    
+    exists = os.path.isfile(filename)
+    with open(filename, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=data_list[0].keys())
+        if not exists: writer.writeheader()
+        writer.writerows(data_list)
+
+
 # ================= MAIN =================
-def main():
+if __name__ == "__main__":
     driver = setup_driver()
-    user_agent = driver.execute_script("return navigator.userAgent")
-
+    
     try:
-        logger.info("🚀 BẮT ĐẦU")
-        video_links = scroll_get_video_links(driver, LIMIT_VIDEOS)
-        cookies = get_cookie_dict(driver)
-
-        for idx, url in enumerate(video_links, 1):
-            logger.info(f"\n[{idx}] {url}")
-            video = get_video_info(driver, url)
-            save_csv(VIDEO_FILE, video, video.keys())
-
-            comments = fetch_comments_api(
-                video["video_id"],
-                cookies,
-                user_agent,
-                MAX_COMMENTS_PER_VIDEO
-            )
-            if comments:
-                save_csv(COMMENT_FILE, comments, comments[0].keys())
-
-            time.sleep(random.uniform(5, 8))
-
-        logger.info("✅ HOÀN THÀNH")
-
+        # 1. Lấy danh sách video
+        links = get_video_links(driver, TARGET_PROFILE, LIMIT_VIDEOS)
+        
+        if not links:
+            logger.error("❌ Không lấy được link nào. Kiểm tra lại Profile URL.")
+        else:
+            # 2. Duyệt từng video
+            for i, link in enumerate(links, 1):
+                logger.info(f"\n[{i}/{len(links)}] Đang xử lý: {link}")
+                
+                # Lấy Info
+                v_data = get_video_data(driver, link)
+                save_to_csv(VIDEO_FILE, [v_data])
+                
+                # Lấy Comment (nếu video có comment)
+                if v_data['comments_count'] != '0':
+                    c_data = get_comments(driver, v_data['video_id'], MAX_COMMENTS_PER_VIDEO)
+                    save_to_csv(COMMENT_FILE, c_data)
+                
+                time.sleep(random.uniform(3, 5))
+                
+        logger.info("\n✅ HOÀN THÀNH! File đã được lưu.")
+        
+    except Exception as e:
+        logger.error(f"❌ Lỗi: {e}")
+        
     finally:
+        logger.info("👋 Đóng trình duyệt sau 5 giây...")
+        time.sleep(5)
         driver.quit()
 
-
-if __name__ == "__main__":
-    main()
