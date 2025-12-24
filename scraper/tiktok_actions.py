@@ -14,8 +14,21 @@ TARGET_PROFILE = "https://www.tiktok.com/explore"
 LIMIT_VIDEOS = 200
 MAX_COMMENTS_PER_VIDEO = 500
 
+<<<<<<< HEAD
 VIDEO_FILE = "tiktok_videos_data.csv"
 COMMENT_FILE = "tiktok_comments_data.csv"
+=======
+
+# ================= CONFIG =================
+TARGET_PROFILE = "https://www.tiktok.com/"
+LIMIT_VIDEOS = 200
+MAX_COMMENTS_PER_VIDEO = 50
+
+VIDEO_FILE = "tiktok_videos.csv"
+COMMENT_FILE = "tiktok_comments.csv"
+VIDEO_FILE = "tiktok_videos_fixed.csv"
+COMMENT_FILE = "tiktok_comments_fixed.csv"
+>>>>>>> 7de969bb85f6a5e724f5b29e09e599b3c7f6ab2e
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -51,6 +64,199 @@ def solve_captcha(driver):
     except:
         pass
 
+<<<<<<< HEAD
+=======
+# ================= 2. LẤY LINK VIDEO TỪ PROFILE =================
+def get_video_links(driver, url, limit):
+    logger.info(f"🌍 Đang truy cập: {url}")
+    driver.get(url)
+    time.sleep(5) # Chờ web load
+    solve_captcha(driver)
+    
+    links = set()
+    
+    # Cuộn trang để lấy đủ link
+    while len(links) < limit:
+        # Tìm thẻ a chứa link video (Selector chuẩn cho Profile)
+        elems = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/video/"]')
+        
+        for e in elems:
+            href = e.get_attribute("href")
+            if href:
+                links.add(href)
+                if len(links) >= limit: break
+        
+        if len(links) >= limit: break
+
+        logger.info(f"📜 Đang cuộn... Đã tìm thấy {len(links)} video")
+        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+        time.sleep(random.uniform(2, 4))
+        
+    return list(links)[:limit]
+
+# ================= 3. LẤY THÔNG TIN VIDEO =================
+def get_video_data(driver, video_url):
+    driver.get(video_url)
+    time.sleep(3)
+    solve_captcha(driver)
+    
+    video_id = video_url.split("/video/")[-1].split("?")[0]
+    
+    data = {
+        "video_id": video_id,
+        "url": video_url,
+        "caption": "N/A",
+        "likes": "0",
+        "comments_count": "0"
+    }
+    
+    try:
+        # Dùng data-e2e là ổn định nhất
+        data["caption"] = driver.find_element(By.CSS_SELECTOR, '[data-e2e="video-desc"]').text
+    except: pass
+    
+    try:
+        data["likes"] = driver.find_element(By.CSS_SELECTOR, '[data-e2e="like-count"]').text
+    except: pass
+    
+    try:
+        data["comments_count"] = driver.find_element(By.CSS_SELECTOR, '[data-e2e="comment-count"]').text
+    except: pass
+    
+    logger.info(f"🎬 Video: {video_id} | ❤️ {data['likes']} | 💬 {data['comments_count']}")
+    return data
+
+
+
+# ================= TIKTOK API COMMENT =================
+def fetch_comments_api(video_id, cookies, user_agent, max_comments=50):
+    url = "https://www.tiktok.com/api/comment/list/"
+    headers = {
+        "User-Agent": user_agent,
+        "Referer": f"https://www.tiktok.com/video/{video_id}",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty"
+    }
+
+    params = {
+        "aid": 1988,
+        "aweme_id": video_id,
+        "count": 10,
+        "cursor": 0,
+    }
+
+    comments = []
+
+    while len(comments) < max_comments:
+        for attempt in range(3):
+            try:
+                r = requests.get(
+                    url,
+                    headers=headers,
+                    cookies=cookies,
+                    params=params,
+                    timeout=10
+                )
+                break
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"⚠️ Retry {attempt+1}/3: {e}")
+                time.sleep(random.uniform(2, 4))
+        else:
+            break
+
+        if r.status_code != 200:
+            logger.warning(f"❌ Status code {r.status_code}")
+            break
+
+        try:
+            data = r.json()
+        except ValueError:
+            logger.warning("❌ TikTok trả response không phải JSON")
+            break
+
+        if "comments" not in data:
+            break
+
+        for c in data["comments"]:
+            comments.append({
+                "video_id": video_id,
+                "user": c["user"]["nickname"],
+                "comment_text": c["text"]
+            })
+
+        if not data.get("has_more"):
+            break
+
+        params["cursor"] = data["cursor"]
+        time.sleep(random.uniform(2.5, 4))
+
+    logger.info(f"💬 Lấy được {len(comments)} comment")
+    return comments
+
+
+
+# ================= CSV =================
+def save_csv(file, rows, headers):
+    exists = os.path.isfile(file)
+    with open(file, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        if not exists:
+            writer.writeheader()
+        if isinstance(rows, list):
+            writer.writerows(rows)
+        else:
+            writer.writerow(rows)
+
+
+# ================= 4. LẤY COMMENT (BẰNG SELENIUM) =================
+def get_comments(driver, video_id, max_cmt):
+    comments = []
+    logger.info("⬇️ Đang tải comment...")
+    
+    last_count = 0
+    retries = 0
+    
+    while len(comments) < max_cmt:
+        # Tìm tất cả các ô comment cấp 1
+        cmt_elems = driver.find_elements(By.CSS_SELECTOR, '[data-e2e="comment-level-1"]')
+        
+        if len(cmt_elems) > last_count:
+            # Xử lý các comment mới load được
+            new_items = cmt_elems[last_count:]
+            for item in new_items:
+                try:
+                    user = item.find_element(By.CSS_SELECTOR, '[data-e2e="comment-username"]').text
+                    text = item.find_element(By.CSS_SELECTOR, '[data-e2e="comment-level-1-content"]').text
+                    
+                    comments.append({
+                        "video_id": video_id,
+                        "user": user,
+                        "text": text.replace("\n", " ")
+                    })
+                    if len(comments) >= max_cmt: break
+                except: continue
+            
+            last_count = len(cmt_elems)
+            retries = 0
+            logger.info(f"   -> Đã lấy {len(comments)} comment...")
+            
+            # Cuộn xuống một chút để load tiếp
+            driver.execute_script("window.scrollBy(0, 600);")
+            time.sleep(2)
+        else:
+            retries += 1
+            driver.execute_script("window.scrollBy(0, 500);")
+            time.sleep(2)
+            if retries > 3: break # Hết comment hoặc mạng lag
+            
+    return comments
+
+# ================= 5. LƯU FILE =================
+>>>>>>> 7de969bb85f6a5e724f5b29e09e599b3c7f6ab2e
 def save_to_csv(filename, data_list):
     if not data_list: return
     exists = os.path.isfile(filename)
@@ -218,6 +424,7 @@ def get_comments(driver, video_id, max_cmt):
         
     return comments_data
 
+
 # ================= MAIN =================
 def main():
     # 1. Khởi tạo trình duyệt với Session đã lưu
@@ -289,9 +496,16 @@ def main():
     except Exception as e:
         logger.error(f"💥 Lỗi nghiêm trọng: {e}")
     finally:
+<<<<<<< HEAD
         # Luôn đảm bảo trình duyệt được đóng sạch sẽ
         logger.info("👋 Đang đóng trình duyệt...")
         driver.quit()
 
 if __name__ == "__main__":
     main()
+=======
+        logger.info("👋 Đóng trình duyệt sau 5 giây...")
+        time.sleep(5)
+        driver.quit()
+
+>>>>>>> 7de969bb85f6a5e724f5b29e09e599b3c7f6ab2e
