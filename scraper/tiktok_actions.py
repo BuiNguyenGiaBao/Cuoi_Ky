@@ -14,6 +14,14 @@ TARGET_PROFILE = "https://www.tiktok.com"
 LIMIT_VIDEOS = 200           # Số lượng video muốn lấy
 MAX_COMMENTS_PER_VIDEO = 100    # Số comment tối đa mỗi video
 
+
+# ================= CONFIG =================
+TARGET_PROFILE = "https://www.tiktok.com/"
+LIMIT_VIDEOS = 200
+MAX_COMMENTS_PER_VIDEO = 50
+
+VIDEO_FILE = "tiktok_videos.csv"
+COMMENT_FILE = "tiktok_comments.csv"
 VIDEO_FILE = "tiktok_videos_fixed.csv"
 COMMENT_FILE = "tiktok_comments_fixed.csv"
 
@@ -107,6 +115,92 @@ def get_video_data(driver, video_url):
     logger.info(f"🎬 Video: {video_id} | ❤️ {data['likes']} | 💬 {data['comments_count']}")
     return data
 
+
+
+# ================= TIKTOK API COMMENT =================
+def fetch_comments_api(video_id, cookies, user_agent, max_comments=50):
+    url = "https://www.tiktok.com/api/comment/list/"
+    headers = {
+        "User-Agent": user_agent,
+        "Referer": f"https://www.tiktok.com/video/{video_id}",
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Connection": "keep-alive",
+        "Sec-Fetch-Site": "same-origin",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Dest": "empty"
+    }
+
+    params = {
+        "aid": 1988,
+        "aweme_id": video_id,
+        "count": 10,
+        "cursor": 0,
+    }
+
+    comments = []
+
+    while len(comments) < max_comments:
+        for attempt in range(3):
+            try:
+                r = requests.get(
+                    url,
+                    headers=headers,
+                    cookies=cookies,
+                    params=params,
+                    timeout=10
+                )
+                break
+            except requests.exceptions.RequestException as e:
+                logger.warning(f"⚠️ Retry {attempt+1}/3: {e}")
+                time.sleep(random.uniform(2, 4))
+        else:
+            break
+
+        if r.status_code != 200:
+            logger.warning(f"❌ Status code {r.status_code}")
+            break
+
+        try:
+            data = r.json()
+        except ValueError:
+            logger.warning("❌ TikTok trả response không phải JSON")
+            break
+
+        if "comments" not in data:
+            break
+
+        for c in data["comments"]:
+            comments.append({
+                "video_id": video_id,
+                "user": c["user"]["nickname"],
+                "comment_text": c["text"]
+            })
+
+        if not data.get("has_more"):
+            break
+
+        params["cursor"] = data["cursor"]
+        time.sleep(random.uniform(2.5, 4))
+
+    logger.info(f"💬 Lấy được {len(comments)} comment")
+    return comments
+
+
+
+# ================= CSV =================
+def save_csv(file, rows, headers):
+    exists = os.path.isfile(file)
+    with open(file, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        if not exists:
+            writer.writeheader()
+        if isinstance(rows, list):
+            writer.writerows(rows)
+        else:
+            writer.writerow(rows)
+
+
 # ================= 4. LẤY COMMENT (BẰNG SELENIUM) =================
 def get_comments(driver, video_id, max_cmt):
     comments = []
@@ -160,6 +254,7 @@ def save_to_csv(filename, data_list):
         if not exists: writer.writeheader()
         writer.writerows(data_list)
 
+
 # ================= MAIN =================
 if __name__ == "__main__":
     driver = setup_driver()
@@ -195,3 +290,4 @@ if __name__ == "__main__":
         logger.info("👋 Đóng trình duyệt sau 5 giây...")
         time.sleep(5)
         driver.quit()
+
