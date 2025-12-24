@@ -12,9 +12,9 @@ from selenium.webdriver.support import expected_conditions as EC
 
 
 # ================= CONFIG =================
-TARGET_PROFILE = "https://www.tiktok.com/"
-LIMIT_VIDEOS = 5
-MAX_COMMENTS_PER_VIDEO = 50
+TARGET_PROFILE = "https://www.tiktok.com/explore"
+LIMIT_VIDEOS = 200
+MAX_COMMENTS_PER_VIDEO = 100
 
 VIDEO_FILE = "tiktok_videos.csv"
 COMMENT_FILE = "tiktok_comments.csv"
@@ -30,13 +30,20 @@ logger = logging.getLogger(__name__)
 # ================= SELENIUM =================
 def setup_driver():
     options = uc.ChromeOptions()
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    user_data_dir = os.path.join(script_dir, "tiktok_session")
+    
+    if not os.path.exists(user_data_dir):
+        os.makedirs(user_data_dir)
+        
+    options.add_argument(f"--user-data-dir={user_data_dir}")
+    options.add_argument("--profile-directory=Default")
     options.add_argument("--start-maximized")
     options.add_argument("--disable-notifications")
-    options.add_argument("--disable-popup-blocking")
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    )
-    return uc.Chrome(options=options)
+    options.add_argument("--mute-audio")
+
+    driver = uc.Chrome(options=options)
+    return driver
 
 
 def solve_captcha(driver):
@@ -52,29 +59,32 @@ def solve_captcha(driver):
     except:
         pass
 
-
-def get_cookie_dict(driver):
-    cookies = driver.get_cookies()
-    return {c["name"]: c["value"] for c in cookies}
-
-
 # ================= VIDEO LINKS =================
 def scroll_get_video_links(driver, limit):
+    logger.info(f"🌍 Truy cập: {TARGET_PROFILE}")
     driver.get(TARGET_PROFILE)
     time.sleep(5)
     solve_captcha(driver)
 
     links = set()
+    no_new_count = 0
 
-    while len(links) < limit:
+    while len(links) < limit and no_new_count < 5:
         driver.execute_script("window.scrollBy(0, 800)")
         time.sleep(random.uniform(2, 3))
 
         elems = driver.find_elements(By.CSS_SELECTOR, 'a[href*="/video/"]')
+        prev_len = len(links)
+        
         for e in elems:
             href = e.get_attribute("href")
             if href and "/video/" in href:
                 links.add(href)
+
+        if len(links) > prev_len:
+            no_new_count = 0
+        else:
+            no_new_count += 1
 
         logger.info(f"📹 Đã lấy {len(links)}/{limit} video")
 
@@ -90,83 +100,177 @@ def get_video_info(driver, url):
     time.sleep(4)
     solve_captcha(driver)
 
-    video_id = url.split("/video/")[-1].split("?")[0]
+    # Lấy ID từ URL
+    try:
+        video_id = url.split("/video/")[-1].split("?")[0]
+    except:
+        video_id = "unknown"
 
     data = {
         "video_url": url,
         "video_id": video_id,
         "caption": "",
-        "like_count": "",
-        "comment_count": "",
-        "share_count": "",
+        "like_count": "0",
+        "comment_count": "0",
+        "share_count": "0",
+        "save_count": "0" # Thêm cái này vì TikTok hay có nút Save
     }
 
+    # 1. Lấy Caption (Mô tả)
     try:
+        # data-e2e="video-desc" là chuẩn nhất
         caption = driver.find_element(By.CSS_SELECTOR, '[data-e2e="video-desc"]')
         data["caption"] = caption.text
     except:
         pass
 
-    buttons = driver.find_elements(By.TAG_NAME, "button")
-    for b in buttons:
-        aria = (b.get_attribute("aria-label") or "").lower()
-        num = "".join(filter(str.isdigit, aria))
+    # 2. Lấy Like Count
+    try:
+        like = driver.find_element(By.CSS_SELECTOR, '[data-e2e="like-count"]')
+        data["like_count"] = like.text
+    except:
+        pass
 
-        if "like" in aria or "thích" in aria:
-            data["like_count"] = num
-        if "comment" in aria or "bình luận" in aria:
-            data["comment_count"] = num
-        if "share" in aria or "chia sẻ" in aria:
-            data["share_count"] = num
+    # 3. Lấy Comment Count
+    try:
+        comment = driver.find_element(By.CSS_SELECTOR, '[data-e2e="comment-count"]')
+        data["comment_count"] = comment.text
+    except:
+        pass
+
+    # 4. Lấy Share Count
+    try:
+        share = driver.find_element(By.CSS_SELECTOR, '[data-e2e="share-count"]')
+        data["share_count"] = share.text
+    except:
+        pass
+        
+    # 5. Lấy Save/Bookmark Count (Tùy chọn)
+    try:
+        save = driver.find_element(By.CSS_SELECTOR, '[data-e2e="undefined-count"]') # TikTok đôi khi đổi cái này, nhưng thường là format count
+        # Hoặc tìm thẻ cha chứa icon bookmark
+        pass 
+    except:
+        pass
 
     logger.info(
-        f"🎬 {video_id} | ❤️ {data['like_count']} | 💬 {data['comment_count']}"
+        f"🎬 {video_id} | ❤️ {data['like_count']} | 💬 {data['comment_count']} | ↗️ {data['share_count']}"
     )
     return data
 
+# ================= GET COMMENTS =================
+def get_comments(driver, video_id, max_cmt):
+    comments_data = []
+    logger.info(f"⬇️ Đang xử lý video: {video_id}")
 
-# ================= TIKTOK API COMMENT =================
-def fetch_comments_api(video_id, cookies, user_agent, max_comments=50):
-    url = "https://www.tiktok.com/api/comment/list/"
-    headers = {
-        "User-Agent": user_agent,
-        "Referer": f"https://www.tiktok.com/video/{video_id}",
-    }
+    # --- 1. PHƯƠNG PHÁP CLICK MỞ COMMENT (GIỮ NGUYÊN LOGIC TỐT CỦA BẠN) ---
+    clicked = False
+    selectors = [
+        (By.ID, "comments"),
+        (By.CSS_SELECTOR, 'button[data-e2e="comment-icon"]'),
+        (By.XPATH, "//button[contains(., 'Comments')]"),
+        (By.CSS_SELECTOR, '.TUXTabBar-itemTitle')
+    ]
 
-    params = {
-        "aid": 1988,
-        "aweme_id": video_id,
-        "count": 20,
-        "cursor": 0,
-    }
-
-    comments = []
-
-    while len(comments) < max_comments:
-        r = requests.get(url, headers=headers, cookies=cookies, params=params)
-        if r.status_code != 200:
+    for method, selector in selectors:
+        try:
+            element = WebDriverWait(driver, 3).until(EC.presence_of_element_located((method, selector)))
+            # Thử click bằng ActionChains
+            from selenium.webdriver.common.action_chains import ActionChains
+            actions = ActionChains(driver)
+            actions.move_to_element(element).click().perform()
+            # Click bồi thêm bằng JS cho chắc chắn
+            driver.execute_script("arguments[0].click();", element)
+            clicked = True
+            logger.info(f"✅ Đã mở bảng bình luận.")
             break
+        except:
+            continue
 
-        data = r.json()
-        if "comments" not in data:
-            break
+    if not clicked:
+        try:
+            driver.execute_script("document.elementFromPoint(window.innerWidth - 50, window.innerHeight / 2).click();")
+        except: pass
 
-        for c in data["comments"]:
-            comments.append({
-                "video_id": video_id,
-                "user": c["user"]["nickname"],
-                "comment_text": c["text"]
-            })
+    time.sleep(3) 
 
-        if not data.get("has_more"):
-            break
+    # --- 2. LOGIC CÀO VÀ FIX LỖI ĐỢI KHI HẾT COMMENT ---
+    collected_texts = set()
+    retries = 0
+    last_all_items_count = 0  # Biến quan trọng để kiểm tra chạm đáy
+    
+    while len(comments_data) < max_cmt:
+        # Lấy tất cả item đang có trên màn hình
+        all_items = driver.find_elements(By.CSS_SELECTOR, '[data-e2e="comment-level-1"]')
+        current_all_count = len(all_items)
 
-        params["cursor"] = data["cursor"]
-        time.sleep(1)
+        # KIỂM TRA CHẠM ĐÁY: Nếu sau khi scroll mà số lượng phần tử không đổi
+        if current_all_count == last_all_items_count and current_all_count > 0:
+            retries += 1
+            logger.info(f"⏳ Đang cuộn tìm thêm... (Lần thử {retries}/5)")
+            if retries >= 5: # Nếu thử 5 lần không thấy có thêm cmt mới -> Thoát
+                logger.info(f"🛑 Đã hết bình luận thực tế trên video này.")
+                break
+        else:
+            if current_all_count > last_all_items_count:
+                retries = 0 # Reset nếu vẫn thấy có thêm dữ liệu mới
+            last_all_items_count = current_all_count
 
-    logger.info(f"💬 Lấy được {len(comments)} comment")
-    return comments
+        if not all_items:
+            driver.execute_script("window.scrollBy(0, 500);")
+            time.sleep(2)
+            retries += 1
+            if retries > 10: break
+            continue
 
+        # Duyệt qua các item để lấy text mới
+        new_found_in_loop = False
+        for item in all_items:
+            try:
+                # Lấy text nội dung bình luận
+                # TikTok 2025: dùng [data-e2e="comment-level-1-content"] sẽ chính xác hơn item.text
+                try:
+                    raw_text = item.find_element(By.CSS_SELECTOR, '[data-e2e="comment-level-1-content"]').text.strip()
+                except:
+                    raw_text = item.text.split('\n')[0].strip() # Fallback
+
+                if not raw_text or raw_text in collected_texts: 
+                    continue
+                
+                # Lấy User Nickname
+                try:
+                    user_elem = item.find_element(By.CSS_SELECTOR, '[data-e2e="comment-username"]')
+                    user = user_elem.text.strip()
+                except:
+                    # Cách XPath dự phòng của bạn
+                    try:
+                        user_elem = item.find_element(By.XPATH, ".//ancestor::div[contains(@class,'DivContentContainer')]//a[contains(@href, '/@')]")
+                        user = user_elem.get_attribute("href").split("/@")[-1].split("?")[0]
+                    except:
+                        user = "unknown"
+
+                collected_texts.add(raw_text)
+                comments_data.append({
+                    "video_id": video_id,
+                    "user": user,
+                    "text": raw_text.replace('\n', ' ')
+                })
+                new_found_in_loop = True
+                print(f"   + [{len(comments_data)}] {user}: {raw_text[:30]}...")
+
+                if len(comments_data) >= max_cmt: 
+                    break
+            except:
+                continue
+
+        # Scroll tới phần tử cuối cùng để kích hoạt load thêm
+        if all_items:
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center', behavior: 'smooth'});", all_items[-1])
+        
+        time.sleep(random.uniform(1.5, 2.5))
+
+    logger.info(f"✅ Hoàn thành lấy {len(comments_data)} bình luận.")
+    return comments_data
 
 # ================= CSV =================
 def save_csv(file, rows, headers):
@@ -182,36 +286,57 @@ def save_csv(file, rows, headers):
 
 
 # ================= MAIN =================
-def main():
-    driver = setup_driver()
-    user_agent = driver.execute_script("return navigator.userAgent")
-
-    try:
-        logger.info("🚀 BẮT ĐẦU")
-        video_links = scroll_get_video_links(driver, LIMIT_VIDEOS)
-        cookies = get_cookie_dict(driver)
-
-        for idx, url in enumerate(video_links, 1):
-            logger.info(f"\n[{idx}] {url}")
-            video = get_video_info(driver, url)
-            save_csv(VIDEO_FILE, video, video.keys())
-
-            comments = fetch_comments_api(
-                video["video_id"],
-                cookies,
-                user_agent,
-                MAX_COMMENTS_PER_VIDEO
-            )
-            if comments:
-                save_csv(COMMENT_FILE, comments, comments[0].keys())
-
-            time.sleep(random.uniform(5, 8))
-
-        logger.info("✅ HOÀN THÀNH")
-
-    finally:
-        driver.quit()
-
-
 if __name__ == "__main__":
-    main()
+    driver = None
+    
+    try:
+        logger.info("🚀 Khởi động trình duyệt...")
+        driver = setup_driver()
+        
+        # 1. LẤY LINK VIDEO
+        logger.info(f"📺 Bắt đầu lấy {LIMIT_VIDEOS} video...")
+        video_links = scroll_get_video_links(driver, LIMIT_VIDEOS)
+        
+        if not video_links:
+            logger.error("❌ Không lấy được link video nào!")
+        else:
+            logger.info(f"✅ Lấy được {len(video_links)} link video")
+            
+            # 2. DUYỆT MỖI VIDEO
+            for idx, video_url in enumerate(video_links, 1):
+                logger.info(f"\n[{idx}/{len(video_links)}] 🎬 Đang xử lý: {video_url}")
+                
+                try:
+                    # Lấy info video
+                    video_info = get_video_info(driver, video_url)
+                    save_csv(VIDEO_FILE, video_info, video_info.keys())
+                    
+                    # Lấy comment
+                    if video_info['comment_count'] and int(video_info['comment_count']) > 0:
+                        comments = get_comments(driver, video_info['video_id'], MAX_COMMENTS_PER_VIDEO)
+                        if comments:
+                            save_csv(COMMENT_FILE, comments, comments[0].keys())
+                    else:
+                        logger.info("   ℹ️ Video này không có comment")
+                    
+                    # Delay giữa các video
+                    time.sleep(random.uniform(3, 5))
+                    
+                except Exception as e:
+                    logger.error(f"❌ Lỗi xử lý video: {e}")
+                    continue
+        
+        logger.info("\n" + "="*50)
+        logger.info("✅ HOÀN THÀNH!")
+        logger.info(f"📄 Video file: {VIDEO_FILE}")
+        logger.info(f"💬 Comment file: {COMMENT_FILE}")
+        logger.info("="*50)
+        
+    except Exception as e:
+        logger.error(f"❌ Lỗi chung: {e}")
+        
+    finally:
+        if driver:
+            logger.info("👋 Đóng trình duyệt...")
+            time.sleep(3)
+            driver.quit()
