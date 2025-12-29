@@ -1,8 +1,4 @@
-Dưới đây là **phiên bản README hoàn chỉnh – chỉ để copy & dán**, không kèm giải thích thêm.
 
----
-
-```markdown
 # Cuoi_Ky — TikTok Data Collection & Analysis
 
 Dự án cuối kỳ môn **Mã nguồn mở trong Khoa học Dữ liệu**.  
@@ -78,3 +74,4 @@ Chạy các script trong thư mục `Mongo/` để:
 
 Chỉ cần nói 👍
 ```
+
