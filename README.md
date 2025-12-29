@@ -72,6 +72,3 @@ Chạy các script trong thư mục `Mongo/` để:
 * Tăng Phước Bảo
 
 
-Chỉ cần nói 👍
-```
-
